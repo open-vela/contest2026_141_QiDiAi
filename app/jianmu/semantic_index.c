@@ -48,7 +48,7 @@ void si_build(semantic_index_t *idx, const char *snippets[], int n)
     {
       strncpy(idx->docs[idx->count].text, snippets[i], SI_MAX_TEXT - 1);
       idx->docs[idx->count].text[SI_MAX_TEXT - 1] = '\0';
-      v9v3_embed(snippets[i], idx->docs[idx->count].vec, V9V3_DIM);
+      v10_embed(snippets[i], idx->docs[idx->count].vec, V10_DIM);
       idx->count++;
     }
 }
@@ -73,8 +73,8 @@ int si_search(const semantic_index_t *idx,
       return 0;
     }
 
-  float qvec[V9V3_DIM];
-  if (v9v3_embed(query, qvec, V9V3_DIM) != 0)
+  float qvec[V10_DIM];
+  if (v10_embed(query, qvec, V10_DIM) < 0)
     {
       return 0;
     }
@@ -88,7 +88,7 @@ int si_search(const semantic_index_t *idx,
 
   for (int i = 0; i < idx->count; i++)
     {
-      float s = cosine(qvec, idx->docs[i].vec, V9V3_DIM);
+      float s = cosine(qvec, idx->docs[i].vec, V10_DIM);
       if (s <= scores[SI_TOP_K - 1])
         {
           continue; /* not better than current worst */

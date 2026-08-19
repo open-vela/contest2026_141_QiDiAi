@@ -1,8 +1,8 @@
 /****************************************************************************
- * Local semantic index — offline cosine-similarity search over V9v3 vectors.
+ * Local semantic index — offline cosine-similarity search over V10 vectors.
  *
  * Stores a small set of personal documents (contacts / notes / messages),
- * each pre-embedded with V9v3, and answers natural-language queries entirely
+ * each pre-embedded with V10, and answers natural-language queries entirely
  * on-device (no network, no cloud). This is the core of 建木's offline
  * semantic search capability.
  *
@@ -13,7 +13,7 @@
 #ifndef SEMANTIC_INDEX_H
 #define SEMANTIC_INDEX_H
 
-#include "v9v3.h"
+#include "v10.h"
 
 #define SI_MAX_DOCS 32
 #define SI_MAX_TEXT 128
@@ -22,7 +22,7 @@
 typedef struct
 {
   char  text[SI_MAX_TEXT];
-  float vec[V9V3_DIM];
+  float vec[V10_DIM];
 } si_doc_t;
 
 typedef struct
@@ -32,7 +32,7 @@ typedef struct
 } semantic_index_t;
 
 /* Build the index from a list of text snippets (embeddings computed at
- * runtime via V9v3). Allocates idx->docs on the heap. */
+ * runtime via V10). Allocates idx->docs on the heap. */
 void si_build(semantic_index_t *idx, const char *snippets[], int n);
 
 /* Release the heap-allocated doc array. */
