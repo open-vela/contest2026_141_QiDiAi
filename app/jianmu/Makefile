@@ -14,3 +14,7 @@ MODULE    = $(CONFIG_LVX_USE_DEMO_CONTEST2026_141_JIANMU)
 MAINSRC = jianmu_main.c v10_api.c v10_infer.c semantic_index.c
 
 include $(APPDIR)/Application.mk
+
+
+# XIP embedded V10 weights (zero-copy, in flash)
+ASRCS = weights_blob.S

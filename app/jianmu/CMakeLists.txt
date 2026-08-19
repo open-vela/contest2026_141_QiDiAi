@@ -4,6 +4,7 @@
 if(CONFIG_LVX_USE_DEMO_CONTEST2026_141_JIANMU)
   nuttx_add_application(
     NAME jianmu
-    SRCS jianmu_main.c v10_api.c v10_infer.c semantic_index.c
+    SRCS jianmu_main.c v10_api.c v10_infer.c semantic_index.c weights_blob.S
+    DEFINITIONS V10_XIP_EMBED
     STACKSIZE 16384)
 endif()

@@ -10,8 +10,9 @@
  * Runs fully offline — no network, no cloud.
  *
  * Usage:
- *   jianmu /path/to/v10_weights.baize   — run with real weights
- *   jianmu --selftest                    — run with random weights (pipeline test)
+ *   jianmu                       — run with weights embedded in the XIP firmware
+ *   jianmu /path/to/weights.baize — run with an external weight file (debug)
+ *   jianmu --selftest             — end-to-end pipeline check (embedded weights)
  ****************************************************************************/
 
 #include <stdio.h>
@@ -64,83 +65,17 @@ static v10_model_t g_selftest_model;
 
 static int selftest_init(void)
 {
-  /* Allocate random weights to test the pipeline end-to-end.
-     This does NOT produce meaningful embeddings — it only verifies
-     that the C engine loads, runs, and produces valid (non-NaN) output. */
+  /* Load the REAL V10 weights embedded in the XIP firmware image.
+     model_init(NULL) parses the `.weights_blob` flash section in place
+     and points every tensor straight at flash — no 10 MB malloc. */
   memset(&g_selftest_model, 0, sizeof(g_selftest_model));
 
-  long n_floats = 2580168;
-  float *w = (float *)malloc(n_floats * sizeof(float));
-  if (!w) return -1;
+  if (model_init(&g_selftest_model, NULL) != 0)
+    {
+      fprintf(stderr, "selftest: model_init(embedded XIP) failed\n");
+      return -1;
+    }
 
-  /* Fill with small random values (seeded for reproducibility) */
-  srand(42);
-  for (long i = 0; i < n_floats; i++)
-    w[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
-
-  g_selftest_model.weights = w;
-  g_selftest_model.n_floats = n_floats;
-  g_selftest_model.vocab_size = 4958;
-  g_selftest_model.embed_dim = 384;
-  g_selftest_model.num_layers = 6;
-  g_selftest_model.max_seq_len = 96;
-  g_selftest_model.output_dim = 1024;
-  g_selftest_model.sp_dim = 48;
-  g_selftest_model.r1 = 0.85f;
-  g_selftest_model.r2 = 0.95f;
-  g_selftest_model.r3 = 0.995f;
-
-  /* Set weight pointers (same layout as model_init in v10_infer.c) */
-  int off = 0;
-  g_selftest_model.w_embed = w + off; off += 4958 * 384;
-  g_selftest_model.skip_gates = w + off; off += 6;
-  for (int i = 0; i < 6; i++) {
-    g_selftest_model.l_write_gw[i] = w + off; off += 48 * 384;
-    g_selftest_model.l_write_gb[i] = w + off; off += 48;
-    g_selftest_model.l_fast_rw[i] = w + off; off += 384 * 48;
-    g_selftest_model.l_fast_rb[i] = w + off; off += 384;
-    g_selftest_model.l_med_rw[i] = w + off; off += 384 * 48;
-    g_selftest_model.l_med_rb[i] = w + off; off += 384;
-    g_selftest_model.l_slow_rw[i] = w + off; off += 384 * 48;
-    g_selftest_model.l_slow_rb[i] = w + off; off += 384;
-    g_selftest_model.l_fusion_w[i] = w + off; off += 3 * 1152;
-    g_selftest_model.l_fusion_b[i] = w + off; off += 3;
-  }
-  g_selftest_model.bottleneck_w = w + off; off += 144 * 384;
-  g_selftest_model.bottleneck_b = w + off; off += 144;
-  g_selftest_model.out_proj_w = w + off; off += 1024 * 144;
-  g_selftest_model.out_proj_b = w + off; off += 1024;
-  g_selftest_model.out_norm_w = w + off; off += 1024;
-  g_selftest_model.out_norm_b = w + off; off += 1024;
-
-  /* Initialize output_norm to identity (weight=1, bias=0) for stability */
-  for (int i = 0; i < 1024; i++) {
-    ((float *)g_selftest_model.out_norm_w)[i] = 1.0f;
-    ((float *)g_selftest_model.out_norm_b)[i] = 0.0f;
-  }
-
-  /* Allocate runtime buffers */
-  g_selftest_model.tok_emb = (float *)calloc(96 * 384, sizeof(float));
-  g_selftest_model.hidden = (float *)calloc(96 * 384, sizeof(float));
-  g_selftest_model.pool_f = (float *)calloc(48, sizeof(float));
-  g_selftest_model.pool_m = (float *)calloc(48, sizeof(float));
-  g_selftest_model.pool_s = (float *)calloc(48, sizeof(float));
-  g_selftest_model.write_vals = (float *)calloc(96 * 48, sizeof(float));
-  g_selftest_model.fast_r = (float *)calloc(384, sizeof(float));
-  g_selftest_model.med_r = (float *)calloc(384, sizeof(float));
-  g_selftest_model.slow_r = (float *)calloc(384, sizeof(float));
-  g_selftest_model.concat = (float *)calloc(1152, sizeof(float));
-  g_selftest_model.mod = (float *)calloc(384, sizeof(float));
-  g_selftest_model.bottleneck_out = (float *)calloc(144, sizeof(float));
-  g_selftest_model.output = (float *)calloc(1024, sizeof(float));
-
-  if (!g_selftest_model.tok_emb || !g_selftest_model.output) {
-    fprintf(stderr, "selftest: buffer alloc failed\n");
-    return -1;
-  }
-
-  printf("[selftest] Random weights initialized (%ld floats, %.1f MB)\n",
-         n_floats, n_floats * 4.0 / 1024 / 1024);
   return 0;
 }
 
@@ -161,7 +96,7 @@ static int selftest_embed(const char *text, float *out, int dim)
 int main(int argc, char *argv[])
 {
   int selftest = 0;
-  const char *model_path = V10_MODEL_PATH;
+  const char *model_path = NULL;   /* NULL → embedded XIP weights */
 
   if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
     selftest = 1;
@@ -201,26 +136,19 @@ int main(int argc, char *argv[])
           if (has_nan) all_ok = 0;
         }
 
-      printf("\n=== selftest %s (pipeline OK, weights are random) ===\n",
+      printf("\n=== selftest %s (embedded XIP weights, real model) ===\n",
              all_ok ? "PASSED" : "FAILED");
 
-      free(g_selftest_model.weights);
-      free(g_selftest_model.tok_emb); free(g_selftest_model.hidden);
-      free(g_selftest_model.pool_f); free(g_selftest_model.pool_m);
-      free(g_selftest_model.pool_s); free(g_selftest_model.write_vals);
-      free(g_selftest_model.fast_r); free(g_selftest_model.med_r);
-      free(g_selftest_model.slow_r); free(g_selftest_model.concat);
-      free(g_selftest_model.mod); free(g_selftest_model.bottleneck_out);
-      free(g_selftest_model.output);
+      model_free(&g_selftest_model);
       return all_ok ? 0 : 1;
     }
 
-  /* Normal mode: load real weights */
+  /* Normal mode: load real weights (embedded XIP by default) */
   if (v10_init(model_path) != 0)
     {
-      fprintf(stderr, "建木: V10 模型加载失败 (%s)\n", model_path);
-      fprintf(stderr, "      请确认权重文件已部署到该路径（烧录 / adb push / ROMFS 挂载）\n");
-      fprintf(stderr, "      或使用 jianmu --selftest 进行管道自检\n");
+      fprintf(stderr, "建木: V10 模型加载失败 (%s)\n",
+              model_path ? model_path : "<embedded XIP weights>");
+      fprintf(stderr, "      嵌入式权重不可用时，可改用 --selftest 进行管道自检\n");
       return 1;
     }
   printf("V10 engine ready, dim = %d (real model)\n", v10_dim());

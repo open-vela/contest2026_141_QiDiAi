@@ -47,6 +47,18 @@
 #define E3      (E * 3)   /* 1152 */
 #define EPS     1e-5f
 
+/* ============ Embedded XIP weights (构建期可选) ============
+ *
+ * 当固件以 V10_XIP_EMBED 编译时，weights_blob.S 会把 v10_weights.baize
+ * 作为 `.weights_blob` 段链入镜像，板级 ld.script 将其放在 XIP NOR flash
+ * 中（紧随其余镜像内容之后）。这里只声明符号，运行时原地解析 ——
+ * 权重的 malloc 与拷贝全部省掉，张量指针直接指向 flash。
+ */
+#ifdef V10_XIP_EMBED
+extern const unsigned char v10_weights_blob_start[];
+extern const unsigned char v10_weights_blob_end[];
+#endif
+
 /* ============ Model struct ============ */
 typedef struct {
     int vocab_size, embed_dim, num_layers, max_seq_len, output_dim, sp_dim;
@@ -136,18 +148,75 @@ float *load_baize(const char *path, long *out_n_floats, int *out_version) {
     return (float *)(buf + 68);
 }
 
+/* ============ Zero-copy embedded loader ============ */
+static float *embedded_weights(const unsigned char *buf,
+                               const unsigned char *end,
+                               long *out_n_floats,
+                               int *out_version) {
+    const uint32_t *hdr;
+    long n;
+
+    if (buf == NULL || end < buf + 68)
+      {
+        return NULL;
+      }
+
+    if (buf[0] != 'B' || buf[1] != 'A' || buf[2] != 'I' || buf[3] != 'Z')
+      {
+        return NULL;
+      }
+
+    hdr = (const uint32_t *)buf;
+    if (hdr[1] != 10)   /* version */
+      {
+        return NULL;
+      }
+
+    n = (long)hdr[2];
+    if ((const uint8_t *)(buf + 68) + (size_t)n * 4 > end)
+      {
+        fprintf(stderr, "V10: embedded blob shorter than header claims\n");
+        return NULL;
+      }
+
+    if (out_version) *out_version = (int)hdr[1];
+    if (out_n_floats) *out_n_floats = n;
+    return (float *)(buf + 68);
+}
+
 /* ============ Model init / free ============ */
 int model_init(Model *m, const char *path) {
     memset(m, 0, sizeof(*m));
 
     long n_floats;
     int version;
-    float *data = load_baize(path, &n_floats, &version);
-    if (!data) return -1;
+    int embedded = 0;
+    float *data;
+
+    if (path == NULL) {
+        /* XIP embedded weights: tensor pointers go straight into flash */
+#ifdef V10_XIP_EMBED
+        data = embedded_weights(v10_weights_blob_start,
+                                v10_weights_blob_end,
+                                &n_floats, &version);
+        if (data == NULL)
+          {
+            fprintf(stderr, "V10: embedded XIP weights unavailable or corrupt\n");
+            return -1;
+          }
+        embedded = 1;
+#else
+        fprintf(stderr, "V10: built without embedded weights (V10_XIP_EMBED)\n");
+        return -1;
+#endif
+    } else {
+        data = load_baize(path, &n_floats, &version);
+        if (!data) return -1;
+    }
 
     if (version != 10) {
         fprintf(stderr, "V10: Wrong .baize version: %d (expected 10)\n", version);
-        free((void *)((uint8_t *)data - 68));
+        if (!embedded) free((void *)((uint8_t *)data - 68));
         return -1;
     }
 
@@ -201,11 +270,11 @@ int model_init(Model *m, const char *path) {
     if (off != n_floats) {
         fprintf(stderr, "V10: Weight layout mismatch: consumed %d, expected %ld\n",
                 off, n_floats);
-        free((void *)((uint8_t *)data - 68));
+        if (!embedded) free((void *)((uint8_t *)data - 68));
         return -1;
     }
 
-    /* Allocate runtime buffers */
+    /* Allocate runtime buffers (weights themselves stay in flash — zero heap) */
     m->tok_emb       = (float *)calloc(N * E, sizeof(float));
     m->hidden        = (float *)calloc(N * E, sizeof(float));
     m->pool_f        = (float *)calloc(S, sizeof(float));
@@ -227,7 +296,8 @@ int model_init(Model *m, const char *path) {
         return -1;
     }
 
-    printf("[V10] %ld params, weights=%.1f MB, runtime=%.1f KB\n",
+    printf("[V10] %s%ld params, weights=%.1f MB, runtime=%.1f KB\n",
+           embedded ? "[XIP] " : "",
            n_floats,
            n_floats * 4.0 / 1024 / 1024,
            (N*E*2 + S*3 + N*S + E*3 + E3 + E + S3 + O) * 4.0 / 1024);
@@ -236,9 +306,20 @@ int model_init(Model *m, const char *path) {
 
 void model_free(Model *m) {
     if (m->weights) {
-        /* weights points into the malloc'd buffer (data - 68 header bytes) */
-        free((void *)((uint8_t *)m->weights - 68));
-        m->weights = NULL;
+#ifdef V10_XIP_EMBED
+        if ((const unsigned char *)m->weights >= v10_weights_blob_start &&
+            (const unsigned char *)m->weights <  v10_weights_blob_end)
+          {
+            /* Weights point into the XIP flash blob — nothing to free */
+            m->weights = NULL;
+          }
+        else
+#endif
+        {
+            /* weights points into the malloc'd buffer (data - 68 header bytes) */
+            free((void *)((uint8_t *)m->weights - 68));
+            m->weights = NULL;
+        }
     }
     free(m->tok_emb); free(m->hidden);
     free(m->pool_f); free(m->pool_m); free(m->pool_s);
